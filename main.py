@@ -2,9 +2,84 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+import tkinter as tk
+from tkinter import filedialog
 import ttkbootstrap as ttk
-from ttkbootstrap.widgets.scrolled import ScrolledText , ScrolledFrame
+from ttkbootstrap.widgets.scrolled import ScrolledText
+
+# Runner mode: when the packaged exe is launched with --run-code it only runs
+# the custom cipher code and exits. This must stay above any GUI code so no
+# window is created in this mode.
+if len(sys.argv) == 4 and sys.argv[1] == "--run-code":
+    with open(sys.argv[2], "r", encoding="utf-8") as f:
+        d = json.load(f)
+    try:
+        ns = {}
+        exec(d["code"], ns)
+        out = {"ok": True, "result": str(ns[d["function"]](d["text"]))}
+    except Exception as error:
+        out = {"ok": False, "result": str(error)}
+    with open(sys.argv[3], "w", encoding="utf-8") as f:
+        json.dump(out, f)
+    sys.exit()
+
 #Functions
+
+def soft_style(widget, container=False):
+    # Paints a Scrolled widget and every internal part of it with the app
+    # background. Newer ttkbootstrap versions ignore style= on these widgets,
+    # which leaves a gray area, so the parts are coloured directly instead.
+    def paint(w):
+        try:
+            cls = w.winfo_class()
+            if cls in ("Frame", "Canvas", "Labelframe"):
+                w.configure(background="#0B1320", highlightthickness=0)
+            elif cls == "TFrame":
+                w.configure(style="Content.TFrame")
+        except Exception:
+            pass
+        for child in w.winfo_children():
+            paint(child)
+    paint(widget)
+
+scroll_areas = []
+wheel_bound = False
+
+def on_mousewheel(event):
+    # Scrolls whichever scroll area the mouse pointer is over.
+    try:
+        widget = event.widget.winfo_containing(event.x_root, event.y_root)
+    except Exception:
+        return
+    while widget is not None:
+        for canvas, inner in scroll_areas:
+            if widget is canvas:
+                if inner.winfo_reqheight() > canvas.winfo_height():
+                    canvas.yview_scroll(int(-event.delta / 120), "units")
+                return
+        widget = widget.master
+
+def make_scroll_area(parent):
+    # A simple vertical-only scroll area. Returns (outer, inner): pack the
+    # outer frame, and put your widgets inside the inner frame.
+    global wheel_bound
+    outer = tk.Frame(parent, background="#0B1320", highlightthickness=0, borderwidth=0)
+    canvas = tk.Canvas(outer, background="#0B1320", highlightthickness=0, borderwidth=0)
+    bar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+    inner = tk.Frame(canvas, background="#0B1320", highlightthickness=0, borderwidth=0)
+    window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+    canvas.configure(yscrollcommand=bar.set)
+    inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window_id, width=e.width))
+    canvas.pack(side="left", fill="both", expand=True)
+    bar.pack(side="right", fill="y")
+    scroll_areas.append((canvas, inner))
+    if not wheel_bound:
+        outer.bind_all("<MouseWheel>", on_mousewheel)
+        wheel_bound = True
+    return outer, inner
+
 
 a = [
     ("What is it?",
@@ -205,10 +280,8 @@ def learn_content(cipher):
         ttk.Label(learn_window, text=cipher["name"], style="LearnTitle.TLabel").pack(side="top", anchor="w", padx=20, pady=(20, 0))
         ttk.Label(learn_window, text=cipher["info"], style="LearnSub.TLabel").pack(side="top", anchor="w", padx=20, pady=(2, 10))
         ttk.Frame(learn_window, style="CardBorder.TFrame", height=1).pack(side="top", fill="x", pady=(0, 10))
-        content_area = ScrolledFrame(learn_window, autohide=True)
-        content_area.configure(style="Content.TFrame")
-        content_area.container.configure(style="Content.TFrame")
-        content_area.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+        content_outer, content_area = make_scroll_area(learn_window)
+        content_outer.pack(fill="both", expand=True, padx=20, pady=(0, 20))
         for title_text, body_text, code_text in cipher["section"]:
             border = ttk.Frame(content_area, style="CardBorder.TFrame", padding=1)
             border.pack(side="top", fill="x", padx=(0, 15), pady=8)
@@ -275,17 +348,15 @@ def fav_cipher():
     heading_label.pack(pady=20)
     sep_2 = ttk.Frame(cipher_card_window, style="CardBorder.TFrame", height=1)
     sep_2.pack(side="top", fill="x", pady=(0, 20))
-    cards_area = ScrolledFrame(cipher_card_window, autohide=True)
-    cards_area.configure(style="Content.TFrame")
-    cards_area.container.configure(style="Content.TFrame")
-    cards_area.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+    cards_outer, cards_area = make_scroll_area(cipher_card_window)
+    cards_outer.pack(fill="both", expand=True, padx=20, pady=(0, 20))
     for i in ciphers:
         create_cipher_card(cards_area, i,"fav").pack(side="top", fill="x", padx=20, pady=10)
 
 def caesar_cipher(text , shift):
     result= ''
     for i in text:
-        if i.isalpha():
+        if i.isascii() and i.isalpha():
             shift_base = ord('A') if i.isupper() else ord('a')
             result += chr((ord(i) - shift_base + shift) % 26 + shift_base)
         else:
@@ -336,6 +407,39 @@ def substitution_cipher(text , alphabet , decrypt = False):
             result += i
     return result
 
+def open_text_file():
+    path = filedialog.askopenfilename(title="Open a text file", filetypes=[("Text files", "*.txt"), ("All files", "*.*")])
+    if path == "":
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except (OSError, UnicodeDecodeError):
+        show_result("Could not read that file. Use a plain text (.txt) file.")
+        return
+    if len(content) > 50000:
+        show_result("That file is too big (the limit is 50,000 characters).")
+        return
+    message_text.text.delete("1.0", "end")
+    message_text.text.insert("1.0", content)
+
+def save_result_file():
+    text = result_text.text.get("1.0", "end-1c")
+    if text.strip() == "":
+        show_result("Nothing to save yet. Encrypt or decrypt a message first.")
+        return
+    path = filedialog.asksaveasfilename(title="Save the result", defaultextension=".txt", filetypes=[("Text files", "*.txt")], initialfile="result.txt")
+    if path == "":
+        return
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+    except OSError:
+        show_result("Could not save the file.")
+        return
+    save_button.configure(text="Saved!")
+    window.after(1500, lambda: save_button.configure(text="Save"))
+
 def show_result(text):
     result_text.text.delete("1.0", "end")
     result_text.text.insert("1.0", text)
@@ -355,15 +459,29 @@ runner_code = (
 )
 
 def run_code_safely(code , function_name , text):
-    if getattr(sys, "frozen", False):
-        namespace = {}
-        try:
-            exec(code , namespace)
-            return str(namespace[function_name](text))
-        except Exception as error:
-            return "Error in your code: " + str(error)
-    payload = json.dumps({"code": code, "function": function_name, "text": text})
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if getattr(sys, "frozen", False):
+        # Packaged exe: relaunch ourselves in runner mode (see top of file).
+        # Files are used instead of pipes because a windowed exe has no stdin/stdout.
+        with tempfile.TemporaryDirectory() as folder:
+            in_path = os.path.join(folder, "in.json")
+            out_path = os.path.join(folder, "out.json")
+            with open(in_path, "w", encoding="utf-8") as f:
+                json.dump({"code": code, "function": function_name, "text": text}, f)
+            try:
+                subprocess.run([sys.executable, "--run-code", in_path, out_path],
+                               timeout=10, creationflags=flags)
+            except subprocess.TimeoutExpired:
+                return "Error in your code: it ran for too long and was stopped."
+            try:
+                with open(out_path, "r", encoding="utf-8") as f:
+                    out = json.load(f)
+            except (OSError, ValueError):
+                return "Error in your code: it crashed."
+        if not out["ok"]:
+            return "Error in your code: " + out["result"]
+        return out["result"]
+    payload = json.dumps({"code": code, "function": function_name, "text": text})
     try:
         done = subprocess.run([sys.executable, "-c", runner_code], input=payload, capture_output=True,
                               text=True, timeout=3, creationflags=flags)
@@ -385,6 +503,10 @@ def run_custom(data , text , mode):
     code = data["encrypt"] if mode == "encrypt" else data["decrypt"]
     function_name = "encrypt" if mode == "encrypt" else "decrypt"
     return run_code_safely(code , function_name , text)
+
+def clear_message():
+    message_text.text.delete("1.0", "end")
+    result_text.text.delete("1.0", "end")
 
 def run_cipher(mode):
     if current_cipher is None:
@@ -463,7 +585,7 @@ def build_cipher_page(cipher):
     page_message_border = ttk.Frame(page_message_box, style="CardBorder.TFrame", padding=1)
     page_message_border.pack(side="top", padx=20, pady=10, anchor="w")
     page_message = ScrolledText(page_message_border, padding=0, width=80, height=4, autohide=True, wrap="word")
-    page_message.configure(style="Content.TFrame")
+    soft_style(page_message)
     page_message.pack()
     page_message.text.configure(font=("Arial", 13), background="#0B1320",
                                 foreground="#FFFFFF", insertbackground="#FFFFFF",
@@ -486,7 +608,7 @@ def build_cipher_page(cipher):
     page_result_border = ttk.Frame(page_result_box, style="CardBorder.TFrame", padding=1)
     page_result_border.pack(side="top", padx=20, pady=10, anchor="w")
     page_result = ScrolledText(page_result_border, padding=0, width=80, height=3, autohide=True, wrap="word")
-    page_result.configure(style="Content.TFrame")
+    soft_style(page_result)
     page_result.pack()
     page_result.text.configure(font=("Arial", 13), background="#0B1320",
                                foreground="#FFFFFF", insertbackground="#FFFFFF",
@@ -718,7 +840,7 @@ entry_border = ttk.Frame(boxframe, style="CardBorder.TFrame", padding=1)
 entry_border.pack(side="left", padx=20, pady=10, anchor="n")
 
 message_text = ScrolledText(entry_border, padding=0, width=80, height=4, autohide=True, wrap="word")
-message_text.configure(style="Content.TFrame")
+soft_style(message_text)
 message_text.pack()
 
 message_text.text.configure(font=("Arial", 13), background="#0B1320",
@@ -759,7 +881,7 @@ keyword_entry = ttk.Entry(vigenere_option, width=20, style="Form.TEntry")
 keyword_entry.pack(anchor="w", pady=5)
 
 no_option = ttk.Frame(options_frame, style="Footer.TFrame")
-no_option_label = ttk.Label(no_option, text="No settings for this cipher", font=("Arial", 13), background="#111827", foreground="#8B97AD")
+no_option_label = ttk.Label(no_option, text="", font=("Arial", 13), background="#111827", foreground="#8B97AD")
 no_option_label.pack(anchor="w")
 
 
@@ -781,6 +903,9 @@ style.map("Dec.TButton", background=[("active", "#1F2937")])
 style.configure("Copy.TButton", background="#111827", foreground="#E5E7EB", font=("Arial", 10),
                 padding=(12, 4), borderwidth=1, bordercolor="#1F2A44", focuscolor="#111827")
 style.map("Copy.TButton", background=[("active", "#1F2937")])
+style.configure("Clear.TButton", background="#111827", foreground="#8B97AD", font=("Arial", 12),
+                padding=(25, 8), borderwidth=1, bordercolor="#1F2A44", focuscolor="#111827")
+style.map("Clear.TButton", background=[("active", "#1F2937")], foreground=[("active", "#FFFFFF")])
 
 button_row = ttk.Frame(message_box, style="Footer.TFrame")
 button_row.pack(side="top", anchor="w", padx=20, pady=(5, 0))
@@ -788,6 +913,10 @@ encrypt_button = ttk.Button(button_row, text="🔒  Encrypt", style="Enc.TButton
 encrypt_button.pack(side="left", padx=(0, 10))
 decrypt_button = ttk.Button(button_row, text="🔓  Decrypt", style="Dec.TButton", command=lambda: run_cipher("decrypt"))
 decrypt_button.pack(side="left")
+clear_button = ttk.Button(button_row ,text = "Clear", style = "Clear.TButton" ,command = lambda: clear_message())
+clear_button.pack(side = "left" ,padx = (5 , 0))
+open_button = ttk.Button(button_row, text="📂  Open file", style="Clear.TButton", command=open_text_file)
+open_button.pack(side="left", padx=(5, 0))
 
 result_box = ttk.Frame(lab_page, style="Footer.TFrame", padding=15)
 result_box.pack(side="top", fill="x", padx=20, pady=(0, 20))
@@ -797,10 +926,12 @@ result_label = ttk.Label(result_top, text="Result", font=("Arial", 13), backgrou
 result_label.pack(side="left", padx=20)
 copy_button = ttk.Button(result_top, text="Copy", style="Copy.TButton", command=copy_result)
 copy_button.pack(side="right", padx=20)
+save_button = ttk.Button(result_top, text="Save", style="Copy.TButton", command=save_result_file)
+save_button.pack(side="right")
 result_border = ttk.Frame(result_box, style="CardBorder.TFrame", padding=1)
 result_border.pack(side="top", padx=20, pady=10, anchor="w")
 result_text = ScrolledText(result_border, padding=0, width=80, height=3, autohide=True, wrap="word")
-result_text.configure(style="Content.TFrame")
+soft_style(result_text)
 result_text.pack()
 result_text.text.configure(font=("Arial", 13), background="#0B1320",
                            foreground="#FFFFFF", insertbackground="#FFFFFF",
@@ -826,10 +957,8 @@ lesson_list.pack(side="left", padx=20, anchor="n")
 lesson_box = ttk.Frame(learn_page, style="Footer.TFrame", padding=20)
 lesson_box.pack(side="left", fill="both", expand=True, padx=(0, 20), pady=(0, 20))
 
-learn_cards_area = ScrolledFrame(lesson_box, autohide=True)
-learn_cards_area.configure(style="Content.TFrame")
-learn_cards_area.container.configure(style="Content.TFrame")
-learn_cards_area.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+learn_cards_outer, learn_cards_area = make_scroll_area(lesson_box)
+learn_cards_outer.pack(fill="both", expand=True, padx=20, pady=(0, 20))
 for i in ciphers:
     create_cipher_card(learn_cards_area, i,"lrn").pack(side="top", fill="x", padx=20, pady=10)
 
@@ -898,7 +1027,7 @@ ttk.Label(encrypt_col, text="Encryption Function", style="FormLabel.TLabel").pac
 encrypt_border = ttk.Frame(encrypt_col, style="CardBorder.TFrame", padding=1)
 encrypt_border.pack(anchor="w", pady=5)
 encrypt_code = ScrolledText(encrypt_border, padding=0, width=45, height=8, autohide=True, wrap="none")
-encrypt_code.configure(style="Content.TFrame")
+soft_style(encrypt_code)
 encrypt_code.pack()
 encrypt_code.text.configure(font=("Consolas", 12), background="#0B1320", foreground="#93C5FD",
                             insertbackground="#FFFFFF", borderwidth=0, highlightthickness=0,
@@ -909,7 +1038,7 @@ ttk.Label(decrypt_col, text="Decryption Function", style="FormLabel.TLabel").pac
 decrypt_border = ttk.Frame(decrypt_col, style="CardBorder.TFrame", padding=1)
 decrypt_border.pack(anchor="w", pady=5)
 decrypt_code = ScrolledText(decrypt_border, padding=0, width=45, height=8, autohide=True, wrap="none")
-decrypt_code.configure(style="Content.TFrame")
+soft_style(decrypt_code)
 decrypt_code.pack()
 decrypt_code.text.configure(font=("Consolas", 12), background="#0B1320", foreground="#93C5FD",
                             insertbackground="#FFFFFF", borderwidth=0, highlightthickness=0,
